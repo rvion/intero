@@ -6,15 +6,18 @@
 -- | Find type/location information.
 
 module GhciFind
-  (findType,FindType(..),findLoc,findNameUses)
+  (findType,FindType(..),findLoc,findNameUses,findCompletions)
   where
 
-import           Control.Applicative
+#if __GLASGOW_HASKELL__ >= 800
+import Module
+#endif
 import           Control.Exception
 import           Data.List
 import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Maybe
+import           DynFlags
 import           FastString
 import           GHC
 import           GhcMonad
@@ -24,6 +27,58 @@ import           Name
 import           SrcLoc
 import           System.Directory
 import           Var
+
+-- | Find completions for the sample, context given by the location.
+findCompletions :: (GhcMonad m)
+                => Map ModuleName ModInfo
+                -> FilePath
+                -> String
+                -> Int
+                -> Int
+                -> Int
+                -> Int
+                -> m (Either String [String])
+findCompletions infos fp sample sl sc el ec =
+  do mname <- guessModule infos fp
+     case mname of
+       Nothing ->
+         return (Left "Couldn't guess that module name. Does it exist?")
+       Just name ->
+         case M.lookup name infos of
+           Nothing ->
+             return (Left ("No module info for the current file! Try loading it?"))
+           Just moduleInf ->
+             do df <- getDynFlags
+                let toplevelNames =
+                      fromMaybe [] (modInfoTopLevelScope (modinfoInfo moduleInf))
+                    filteredToplevels =
+                      filter (isPrefixOf sample)
+                             (map (showppr df) toplevelNames)
+                localNames <- findLocalizedCompletions (modinfoSpans moduleInf) sample sl sc el ec
+                return (Right (take 30 (nub (localNames ++ filteredToplevels))))
+
+-- | Find completions within the local scope of a definition of a
+-- module.
+findLocalizedCompletions
+  :: GhcMonad m
+  => [SpanInfo]
+  -> String
+  -> Int
+  -> Int
+  -> Int
+  -> Int
+  -> m [String]
+findLocalizedCompletions spans' prefix _sl _sc _el _ec =
+  do df <- getDynFlags
+     return (mapMaybe (complete df) spans')
+  where complete
+          :: DynFlags -> SpanInfo -> Maybe String
+        complete df si =
+          do var <- spaninfoVar si
+             let str = showppr df var
+             if isPrefixOf prefix str
+                then Just str
+                else Nothing
 
 -- | Find any uses of the given identifier in the codebase.
 findNameUses :: (GhcMonad m)
@@ -184,7 +239,9 @@ resolveNameFromModule infos name =
        Just modL ->
          do case M.lookup (moduleName modL) infos of
               Nothing ->
-#if __GLASGOW_HASKELL__ >= 709
+#if __GLASGOW_HASKELL__ >= 800
+                do (return (Left (unitIdString (moduleUnitId modL) ++ ":" ++
+#elif __GLASGOW_HASKELL__ >= 709
                 do (return (Left (showppr d (modulePackageKey modL) ++ ":" ++
 #else
                 do (return (Left (showppr d (modulePackageId modL) ++ ":" ++
@@ -264,14 +321,23 @@ findType infos fp string sl sc el ec =
 
 -- | Try to resolve the type display from the given span.
 resolveSpanInfo :: [SpanInfo] -> Int -> Int -> Int -> Int -> Maybe SpanInfo
-resolveSpanInfo spanList parentSL parentSC parentEL parentEC =
-  find inside (reverse spanList) <|> find contains spanList
-  where inside (SpanInfo childSL childSC childEL childEC _ _) =
-          ((childSL == parentSL && childSC >= parentSC) || (childSL > parentSL)) &&
-          ((childEL == parentEL && childEC <= parentEC) || (childEL < parentEL))
-        contains (SpanInfo ancestorSL ancestorSC ancestorEL ancestorEC _ _) =
-          ((ancestorSL == parentSL && parentSC >= ancestorSC) || (ancestorSL > parentSL)) &&
-          ((ancestorEL == parentEL && parentEC <= ancestorEC) || (ancestorEL < parentEL))
+resolveSpanInfo spanList spanSL spanSC spanEL spanEC =
+  listToMaybe
+    (sortBy (flip compareSpanInfoStart)
+            (filter (contains spanSL spanSC spanEL spanEC) spanList))
+
+-- | Compare the start of two span infos.
+compareSpanInfoStart :: SpanInfo -> SpanInfo -> Ordering
+compareSpanInfoStart this that =
+  case compare (spaninfoStartLine this) (spaninfoStartLine that) of
+    EQ -> compare (spaninfoStartCol this) (spaninfoStartCol that)
+    c -> c
+
+-- | Does the 'SpanInfo' contain the location given by the Ints?
+contains :: Int -> Int -> Int -> Int -> SpanInfo -> Bool
+contains spanSL spanSC spanEL spanEC (SpanInfo ancestorSL ancestorSC ancestorEL ancestorEC _ _) =
+  ((ancestorSL == spanSL && spanSC >= ancestorSC) || (ancestorSL < spanSL)) &&
+  ((ancestorEL == spanEL && spanEC <= ancestorEC) || (ancestorEL > spanEL))
 
 -- | Guess a module name from a file path.
 guessModule :: GhcMonad m

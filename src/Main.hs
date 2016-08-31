@@ -1,6 +1,6 @@
 {-# LANGUAGE NondecreasingIndentation #-}
 {-# LANGUAGE CPP #-}
-{-# OPTIONS -fno-warn-incomplete-patterns -optc-DNON_POSIX_SOURCE #-}
+{-# OPTIONS -fno-warn-incomplete-patterns -optc-DNON_POSIX_SOURCE -fno-warn-warnings-deprecations #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 -----------------------------------------------------------------------------
@@ -14,63 +14,65 @@
 module Main (main) where
 
 -- The official GHC API
+import qualified Data.Version (showVersion)
 import qualified GHC
 import GHC              ( -- DynFlags(..), HscTarget(..),
                           -- GhcMode(..), GhcLink(..),
                           Ghc, GhcMonad(..),
                           LoadHowMuch(..) )
-import CmdLineParser
+import           CmdLineParser
+import qualified Paths_intero
 
 -- ghci-ng
 import qualified GHC.Paths
 
 -- Implementations of the various modes (--show-iface, mkdependHS. etc.)
-import LoadIface        ( showIface )
-import HscMain          ( newHscEnv )
-import DriverPipeline   ( oneShot, compileFile )
-import DriverMkDepend   ( doMkDependHS )
+import           LoadIface ( showIface )
+import           HscMain ( newHscEnv )
+import           DriverPipeline ( oneShot, compileFile )
+import           DriverMkDepend ( doMkDependHS )
 #ifdef GHCI
-import InteractiveUI    ( interactiveUI, ghciWelcomeMsg, defaultGhciSettings )
+import           InteractiveUI ( interactiveUI, ghciWelcomeMsg, defaultGhciSettings )
 #endif
 
 
 -- Various other random stuff that we need
-import Config
-import Constants
-import HscTypes
+import           Config
+import           Constants
+import           HscTypes
 #if __GLASGOW_HASKELL__ < 709
-import Packages         ( dumpPackages )
+import           Packages ( dumpPackages )
 #else
-import Packages         ( pprPackages )
+import           Packages ( pprPackages )
 #endif
-import DriverPhases
-import BasicTypes       ( failed )
-import StaticFlags
-import DynFlags
-import ErrUtils
-import FastString
-import Outputable
-import SrcLoc
-import Util
-import Panic
-import MonadUtils       ( liftIO )
+import           DriverPhases
+import           BasicTypes ( failed )
+import           StaticFlags
+import           DynFlags
+import           ErrUtils
+import           FastString
+import           Outputable
+import           SrcLoc
+import           Util
+import           Panic
+import           MonadUtils ( liftIO )
 
 -- Imports for --abi-hash
-import LoadIface           ( loadUserInterface )
-import Module              ( mkModuleName )
-import Finder              ( findImportedModule, cannotFindInterface )
-import TcRnMonad           ( initIfaceCheck )
-import Binary              ( openBinMem, put_, fingerprintBinMem )
+import           LoadIface ( loadUserInterface )
+import           Module ( mkModuleName )
+import           Finder ( findImportedModule, cannotFindInterface )
+import           TcRnMonad ( initIfaceCheck )
+import           Binary ( openBinMem, put_, fingerprintBinMem )
 
 -- Standard Haskell libraries
-import System.IO
-import System.Environment
-import System.Exit
-import System.FilePath
-import Control.Monad
-import Data.Char
-import Data.List
-import Data.Maybe
+import           System.IO
+import           System.Environment
+import           System.Exit
+import           System.FilePath
+import           Control.Monad
+import           Data.Char
+import           Data.List
+import           Data.Maybe
 
 -----------------------------------------------------------------------------
 -- ToDo:
@@ -86,12 +88,27 @@ import Data.Maybe
 
 main :: IO ()
 main = do
+   env <- getEnvironment
    initGCStatistics -- See Note [-Bsymbolic and hooks]
    hSetBuffering stdout LineBuffering
    hSetBuffering stderr LineBuffering
    GHC.defaultErrorHandler defaultFatalMessager defaultFlushOut $ do
     -- 1. extract the -B flag from the args
     argv00 <- getArgs
+    if elem "--version" argv00
+       then do putStrLn ("Intero " ++ Data.Version.showVersion Paths_intero.version)
+               exitSuccess
+       else return ()
+    case lookup "STACK_EXE" env of
+      Just{} -> return ()
+      Nothing ->
+        hPutStr stderr ("WARNING: it is HIGHLY RECOMMENDED to use intero with stack:\n\n"
+                       ++ "  To install:\n"
+                       ++ "    stack build intero\n\n"
+                       ++ "  To run with no project:\n"
+                       ++ "    stack exec intero\n"
+                       ++ "  To run with your project:\n"
+                       ++ "    stack ghci --with-ghc intero\n\n")
     let argv0 = ("-B" ++ GHC.Paths.libdir) :
                 if any (`elem` argv00) ["--info", "--interactive", "--make", "-c"]
                   then argv00 -- needed for "cabal repl --with-ghc=ghci-ng"
@@ -661,7 +678,7 @@ doMake srcs  = do
         haskellish (f,Nothing) =
           looksLikeModuleName f || isHaskellUserSrcFilename f || '.' `notElem` f
         haskellish (_,Just phase) =
-          phase `notElem` [as True, Cc, Cobjc, Cobjcpp, CmmCpp, Cmm, StopLn]
+          phase `notElem` [as True, Cc, Cobjc, CmmCpp, Cmm, StopLn]
 
     hsc_env <- GHC.getSession
 
@@ -853,7 +870,7 @@ unknownFlagsErr fs = throwGhcException $ UsageError $ concatMap oneError fs
   where
     oneError f =
         "unrecognised flag: " ++ f ++ "\n" ++
-        (case fuzzyMatch f (nub allFlags) of
+        (case fuzzyMatch f (nub compat_allFlags) of
             [] -> ""
             suggs -> "did you mean one of:\n" ++ unlines (map ("  " ++) suggs))
 
@@ -886,4 +903,11 @@ as :: Bool -> Phase
 as = As
 #else
 as _ = As
+#endif
+
+compat_allFlags :: [String]
+#if  __GLASGOW_HASKELL__ < 800
+compat_allFlags = allFlags
+#else
+compat_allFlags = allNonDeprecatedFlags
 #endif
